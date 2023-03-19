@@ -47,6 +47,7 @@ def post_language_model_processing(
     return_logits=False,
     sequence_parallel=False,
     gradient_accumulation_fusion=False,
+    logits_shift_in_model=False,
 ):
     if get_key_value:
         lm_output, presents = lm_output
@@ -74,6 +75,10 @@ def post_language_model_processing(
         return output.transpose(0, 1).contiguous()
     else:
         # [b s] -> [s b]
+        if logits_shift_in_model:
+            labels = labels[..., 1:]
+            output = output.transpose(0, 1)[..., :-1, :].transpose(1, 0).contiguous()
+
         labels = labels.transpose(0, 1).contiguous()
 
         if fp16_lm_cross_entropy:
@@ -84,6 +89,8 @@ def post_language_model_processing(
 
         # [s b] -> [b, s]
         loss = loss.transpose(0, 1).contiguous()
+        if logits_shift_in_model:
+            loss = torch.cat([loss, torch.zeros_like(loss[:, -1:])], axis=-1)
 
         if return_logits:
             return loss, output
@@ -151,6 +158,7 @@ class GPTModel(MegatronModule):
         fp8_amax_compute_algo='most_recent',
         reduce_amax=True,
         use_emha=False,
+        logits_shift_in_model=False,
     ):
         super(GPTModel, self).__init__(share_token_embeddings=share_embeddings_and_output_weights)
 
@@ -161,6 +169,7 @@ class GPTModel(MegatronModule):
         self.sequence_parallel = sequence_parallel
         self.gradient_accumulation_fusion = gradient_accumulation_fusion
         self.share_embeddings_and_output_weights = share_embeddings_and_output_weights
+        self.logits_shift_in_model = logits_shift_in_model
 
         if kv_channels is None:
             assert (
@@ -286,6 +295,7 @@ class GPTModel(MegatronModule):
                 return_logits=encoder_input is not None,
                 sequence_parallel=self.sequence_parallel,
                 gradient_accumulation_fusion=self.gradient_accumulation_fusion,
+                logits_shift_in_model=self.logits_shift_in_model,
             )
         else:
             return lm_output
