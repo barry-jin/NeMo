@@ -1095,6 +1095,7 @@ class ParallelTransformer(MegatronModule):
                     bias_dropout_add_fusion=bias_dropout_add_fusion,
                     masked_softmax_fusion=masked_softmax_fusion,
                     use_flash_attention=use_flash_attention,
+                    multi_query_attention=multi_query_attention,
                     gradient_accumulation_fusion=gradient_accumulation_fusion,
                     persist_layer_norm=persist_layer_norm,
                     position_embedding_type=position_embedding_type,

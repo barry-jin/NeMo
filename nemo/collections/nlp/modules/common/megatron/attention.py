@@ -531,11 +531,9 @@ class ParallelAttention(MegatronModule, adapter_mixins.AdapterModuleMixin):
                 )
 
         else:
-            if self.headscale or \
-                layer_past is not None or \
-                self.multi_query_attention:
+            if self.headscale or layer_past is not None:
                 raise NotImplementedError(
-                    "headscale/layer_past/rotary_pos_emb/multi_query_attention are not implemented for triton flash attention."
+                    "headscale/layer_past are not implemented for triton flash attention."
                 )
 
             if rotary_pos_emb is not None:
