@@ -187,6 +187,7 @@ class ParallelAttention(MegatronModule, adapter_mixins.AdapterModuleMixin):
         # Strided linear layer.
         if attention_type == AttnType.self_attn:
             if multi_query_attention:
+                self.num_attention_heads = num_attention_heads
                 self.query = tensor_parallel.ColumnParallelLinear(
                     hidden_size,
                     projection_size,
@@ -447,30 +448,77 @@ class ParallelAttention(MegatronModule, adapter_mixins.AdapterModuleMixin):
 
         logging.warning(f"AttnType.self_attn: {self.attention_type == AttnType.self_attn}")
         logging.warning(f"hidden_states.shape = {hidden_states.shape}")
+        logging.warning(f"np = {self.num_attention_heads_per_partition} (num_attention_heads_per_partition)")
+        logging.warning(f"hn = {self.hidden_size_per_attention_head} (hidden_size_per_attention_head)")
         logging.warning(f"1")
         if self.attention_type == AttnType.self_attn:
             logging.warning(f"2")
             logging.warning(f"multi_query_attention: {self.multi_query_attention}")
             if self.multi_query_attention:
                 logging.warning(f"3")
-                logging.warning(f"query.shape = {self.query.shape}")
-                logging.warning(f"key_value.shape = {self.key_value.shape}")
+                logging.warning(f"query.shape = {self.query.weight.shape}")
+                logging.warning(f"key_value.shape = {self.key_value.weight.shape}")
 
-                # Attention heads [sq, b, h] --> [sq, b, (np * 3 * hn)]
-                mixed_x_layer, _ = self.query(hidden_states)
-                mixed_x_layer, _ = self.key_value(hidden_states)
+                # Attention heads [sk, b, h] --> [sk, b, (np * 2 * hn)]
+                mixed_kv_layer, _ = self.key_value(hidden_states)
+                logging.warning(f"mixed_kv_layer.shape = {mixed_kv_layer.shape}")
 
-                # [sq, b, (np * 3 * hn)] --> [sq, b, np, 3 * hn]
-                new_tensor_shape = mixed_x_layer.size()[:-1] + (
-                    self.num_attention_heads_per_partition,
-                    3 * self.hidden_size_per_attention_head,
-                )
+                # [sk, b, np * 2 * hn] --> 2 [sk, b, np * hn]
+                (key_layer, value_layer) = tensor_parallel.split_tensor_along_last_dim(mixed_kv_layer, 2)
+                logging.warning(f"key_layer.shape = {key_layer.shape}")
+                logging.warning(f"value_layer.shape = {value_layer.shape}")
+
                 if self.megatron_legacy:
-                    mixed_x_layer = self._transpose_last_dim(mixed_x_layer, 3, True)
-                mixed_x_layer = mixed_x_layer.view(*new_tensor_shape)
+                    key_layer = self._transpose_last_dim(key_layer, 2, True)
+                    value_layer = self._transpose_last_dim(value_layer, 2, True)
 
-                # [sq, b, np, 3 * hn] --> 3 [sq, b, np, hn]
-                (query_layer, key_layer, value_layer) = tensor_parallel.split_tensor_along_last_dim(mixed_x_layer, 3)
+                # [sk, b, (np * hn / n)] --> [sk, b, 1, (np * hn / n)]
+                new_tensor_shape = key_layer.shape[:-1] + (
+                    1,
+                    safe_divide(self.num_attention_heads_per_partition * self.hidden_size_per_attention_head, self.num_attention_heads),  # single-head
+                )
+                logging.warning(f"new_tensor_shape = {new_tensor_shape}")
+                key_layer = key_layer.view(*new_tensor_shape)
+                value_layer = value_layer.view(*new_tensor_shape)
+                logging.warning(f"key_layer.shape (view) = {key_layer.shape}")
+                logging.warning(f"value_layer.shape (view) = {value_layer.shape}")
+
+                # [sk, b, 1, (np * hn / n)] --> [sk, b, n, (np * hn / n)]
+                new_tensor_shape = key_layer.size()[:-2] + (
+                    self.num_attention_heads,  # replicated multi-head
+                    safe_divide(self.num_attention_heads_per_partition * self.hidden_size_per_attention_head, self.num_attention_heads),  # single-head
+                )
+                logging.warning(f"new_tensor_shape = {new_tensor_shape}")
+                key_layer = key_layer.expand(new_tensor_shape)
+                value_layer = value_layer.expand(new_tensor_shape)
+                logging.warning(f"key_layer.shape (expand) = {key_layer.shape}")
+                logging.warning(f"value_layer.shape (expand) = {value_layer.shape}")
+
+                # [sk, b, n, (np * hn / n)] --> [sk, b, np, hn]
+                new_tensor_shape = key_layer.size()[:-2] + (
+                    self.num_attention_heads_per_partition,
+                    self.hidden_size_per_attention_head,
+                )
+                logging.warning(f"new_tensor_shape = {new_tensor_shape}")
+                key_layer = key_layer.reshape(new_tensor_shape)
+                value_layer = value_layer.reshape(new_tensor_shape)
+                logging.warning(f"key_layer.shape (view) = {key_layer.shape}")
+                logging.warning(f"value_layer.shape (view) = {value_layer.shape}")
+                logging.warning("-----key_layer and value_layer------")
+
+                # -------------------------------------------------------
+                # QUERY LAYER
+                # -------------------------------------------------------
+                # Attention heads [sq, b, h] --> [sq, b, (np * hn)]
+                query_layer, _ = self.query(hidden_states)
+
+                # [sq, b, (np * hn)] --> [sq, b, np, hn]
+                new_tensor_shape = query_layer.size()[:-1] + (
+                    self.num_attention_heads_per_partition,
+                    self.hidden_size_per_attention_head,
+                )
+                query_layer = query_layer.view(*new_tensor_shape)
+                logging.warning("-----query_layer------")
             else:
                 # Attention heads [sq, b, h] --> [sq, b, (np * 3 * hn)]
                 mixed_x_layer, _ = self.query_key_value(hidden_states)
@@ -610,6 +658,9 @@ class ParallelAttention(MegatronModule, adapter_mixins.AdapterModuleMixin):
                 ]
 
             if self.attention_type == AttnType.self_attn:
+                logging.warning(f"q.shape = {q.shape}")
+                logging.warning(f"k.shape = {k.shape}")
+                logging.warning(f"v.shape = {v.shape}")
                 context_layer = self.core_attention_flash(q, k, v, relative_position_bias=relative_position_bias)
             else:
                 context_layer = self.core_attention_flash(q, k, v, attention_mask, relative_position_bias=relative_position_bias)
