@@ -210,6 +210,7 @@ class ParallelAttention(MegatronModule, adapter_mixins.AdapterModuleMixin):
                     no_async_tensor_model_parallel_allreduce=no_async_tensor_model_parallel_allreduce,
                     gradient_accumulation_fusion=gradient_accumulation_fusion,
                 )
+                # self.key_value = torch.nn.Linear(hidden_size, 2 * kv_channels, bias=bias, device=)
             else:
                 # multi-head attention
                 self.query_key_value = tensor_parallel.ColumnParallelLinear(
@@ -446,27 +447,27 @@ class ParallelAttention(MegatronModule, adapter_mixins.AdapterModuleMixin):
         # Query, Key, and Value
         # =====================
 
-        logging.warning(f"AttnType.self_attn: {self.attention_type == AttnType.self_attn}")
-        logging.warning(f"hidden_states.shape = {hidden_states.shape}")
-        logging.warning(f"np = {self.num_attention_heads_per_partition} (num_attention_heads_per_partition)")
-        logging.warning(f"hn = {self.hidden_size_per_attention_head} (hidden_size_per_attention_head)")
-        logging.warning(f"1")
+        # logging.warning(f"AttnType.self_attn: {self.attention_type == AttnType.self_attn}")
+        # logging.warning(f"hidden_states.shape = {hidden_states.shape}")
+        # logging.warning(f"np = {self.num_attention_heads_per_partition} (num_attention_heads_per_partition)")
+        # logging.warning(f"hn = {self.hidden_size_per_attention_head} (hidden_size_per_attention_head)")
+        # logging.warning(f"1")
         if self.attention_type == AttnType.self_attn:
-            logging.warning(f"2")
-            logging.warning(f"multi_query_attention: {self.multi_query_attention}")
+            # logging.warning(f"2")
+            # logging.warning(f"multi_query_attention: {self.multi_query_attention}")
             if self.multi_query_attention:
-                logging.warning(f"3")
-                logging.warning(f"query.shape = {self.query.weight.shape}")
-                logging.warning(f"key_value.shape = {self.key_value.weight.shape}")
+                # logging.warning(f"3")
+                # logging.warning(f"query.shape = {self.query.weight.shape}")
+                # logging.warning(f"key_value.shape = {self.key_value.weight.shape}")
 
                 # Attention heads [sk, b, h] --> [sk, b, (np * 2 * hn)]
                 mixed_kv_layer, _ = self.key_value(hidden_states)
-                logging.warning(f"mixed_kv_layer.shape = {mixed_kv_layer.shape}")
+                # logging.warning(f"mixed_kv_layer.shape = {mixed_kv_layer.shape}")
 
                 # [sk, b, np * 2 * hn] --> 2 [sk, b, np * hn]
                 (key_layer, value_layer) = tensor_parallel.split_tensor_along_last_dim(mixed_kv_layer, 2)
-                logging.warning(f"key_layer.shape = {key_layer.shape}")
-                logging.warning(f"value_layer.shape = {value_layer.shape}")
+                # logging.warning(f"key_layer.shape = {key_layer.shape}")
+                # logging.warning(f"value_layer.shape = {value_layer.shape}")
 
                 if self.megatron_legacy:
                     key_layer = self._transpose_last_dim(key_layer, 2, True)
@@ -477,34 +478,34 @@ class ParallelAttention(MegatronModule, adapter_mixins.AdapterModuleMixin):
                     1,
                     safe_divide(self.num_attention_heads_per_partition * self.hidden_size_per_attention_head, self.num_attention_heads),  # single-head
                 )
-                logging.warning(f"new_tensor_shape = {new_tensor_shape}")
+                # logging.warning(f"new_tensor_shape = {new_tensor_shape}")
                 key_layer = key_layer.view(*new_tensor_shape)
                 value_layer = value_layer.view(*new_tensor_shape)
-                logging.warning(f"key_layer.shape (view) = {key_layer.shape}")
-                logging.warning(f"value_layer.shape (view) = {value_layer.shape}")
+                # logging.warning(f"key_layer.shape (view) = {key_layer.shape}")
+                # logging.warning(f"value_layer.shape (view) = {value_layer.shape}")
 
                 # [sk, b, 1, (np * hn / n)] --> [sk, b, n, (np * hn / n)]
                 new_tensor_shape = key_layer.size()[:-2] + (
                     self.num_attention_heads,  # replicated multi-head
                     safe_divide(self.num_attention_heads_per_partition * self.hidden_size_per_attention_head, self.num_attention_heads),  # single-head
                 )
-                logging.warning(f"new_tensor_shape = {new_tensor_shape}")
+                # logging.warning(f"new_tensor_shape = {new_tensor_shape}")
                 key_layer = key_layer.expand(new_tensor_shape)
                 value_layer = value_layer.expand(new_tensor_shape)
-                logging.warning(f"key_layer.shape (expand) = {key_layer.shape}")
-                logging.warning(f"value_layer.shape (expand) = {value_layer.shape}")
+                # logging.warning(f"key_layer.shape (expand) = {key_layer.shape}")
+                # logging.warning(f"value_layer.shape (expand) = {value_layer.shape}")
 
                 # [sk, b, n, (np * hn / n)] --> [sk, b, np, hn]
                 new_tensor_shape = key_layer.size()[:-2] + (
                     self.num_attention_heads_per_partition,
                     self.hidden_size_per_attention_head,
                 )
-                logging.warning(f"new_tensor_shape = {new_tensor_shape}")
+                # logging.warning(f"new_tensor_shape = {new_tensor_shape}")
                 key_layer = key_layer.reshape(new_tensor_shape)
                 value_layer = value_layer.reshape(new_tensor_shape)
-                logging.warning(f"key_layer.shape (view) = {key_layer.shape}")
-                logging.warning(f"value_layer.shape (view) = {value_layer.shape}")
-                logging.warning("-----key_layer and value_layer------")
+                # logging.warning(f"key_layer.shape (view) = {key_layer.shape}")
+                # logging.warning(f"value_layer.shape (view) = {value_layer.shape}")
+                # logging.warning("-----key_layer and value_layer------")
 
                 # -------------------------------------------------------
                 # QUERY LAYER
@@ -518,7 +519,7 @@ class ParallelAttention(MegatronModule, adapter_mixins.AdapterModuleMixin):
                     self.hidden_size_per_attention_head,
                 )
                 query_layer = query_layer.view(*new_tensor_shape)
-                logging.warning("-----query_layer------")
+                # logging.warning("-----query_layer------")
             else:
                 # Attention heads [sq, b, h] --> [sq, b, (np * 3 * hn)]
                 mixed_x_layer, _ = self.query_key_value(hidden_states)
@@ -658,9 +659,9 @@ class ParallelAttention(MegatronModule, adapter_mixins.AdapterModuleMixin):
                 ]
 
             if self.attention_type == AttnType.self_attn:
-                logging.warning(f"q.shape = {q.shape}")
-                logging.warning(f"k.shape = {k.shape}")
-                logging.warning(f"v.shape = {v.shape}")
+                # logging.warning(f"q.shape = {q.shape}")
+                # logging.warning(f"k.shape = {k.shape}")
+                # logging.warning(f"v.shape = {v.shape}")
                 context_layer = self.core_attention_flash(q, k, v, relative_position_bias=relative_position_bias)
             else:
                 context_layer = self.core_attention_flash(q, k, v, attention_mask, relative_position_bias=relative_position_bias)
@@ -938,7 +939,7 @@ class CoreAttention(MegatronModule):
 
         # [b, np, sq, sk]
         output_size = (query_layer.size(1), query_layer.size(2), query_layer.size(0), key_layer.size(0))
-        logging.warning(f"output_size: [b, np, sq, sk]={output_size}")
+        # logging.warning(f"output_size: [b, np, sq, sk]={output_size}")
 
         # TODO: figure out how to do this
         # apply relative positional encoding (rotary embedding)
@@ -955,16 +956,12 @@ class CoreAttention(MegatronModule):
         if self.multi_query_attention:
             # ---- [sq, b, np, hn] -> [b, np * sq, hn] ---- deprecated
             # [sq, b, np, hn] -> [b * np, sq, hn]
-            logging.warning(f"query_layer.shape={query_layer.shape} (sq, b, np, hn)")
-            # query_layer = query_layer.permute([1, 2, 0, 3]).reshape(
-            #     output_size[0], output_size[1] * output_size[2], -1
-            # )
+            # logging.warning(f"query_layer.shape={query_layer.shape} (sq, b, np, hn)")
             query_layer = rearrange(query_layer, "sq b np hn -> sq (b np) hn")
 
             # ---- [sk, b, np, hn] -> [b, hn, sk] ---- deprecated
             # [sk, b, np, hn] -> [b * np, hn, sk]
-            logging.warning(f"key_layer.shape={key_layer.shape} (sk, b, np, hn)")
-            # key_layer = key_layer.squeeze(2).permute(1, 2, 0)
+            # logging.warning(f"key_layer.shape={key_layer.shape} (sk, b, np, hn)")
             key_layer = rearrange(key_layer, "sk b np hn -> sk (b np) hn")
 
             # preallocting input tensor: [b * np, sq, sk]
@@ -975,10 +972,6 @@ class CoreAttention(MegatronModule):
                 dtype=query_layer.dtype,
                 device=torch.cuda.current_device(),
             )
-
-            # logging.warning(f"matmul_input_buffer.shape={matmul_input_buffer.shape} (b*np, sq, sk)")
-            # logging.warning(f"query_layer.shape={query_layer.shape} (b*np, sq, hn)")
-            # logging.warning(f"key_layer.shape={key_layer.shape} (b*np, hn, sk)")
 
             # Raw attention scores. [b * np, sq, sk]
             matmul_result = torch.baddbmm(
@@ -1015,7 +1008,7 @@ class CoreAttention(MegatronModule):
 
         # change view to [b, np, sq, sk]
         attention_scores = matmul_result.view(*output_size)
-        logging.warning(f"attention_scores.shape={attention_scores.shape}")
+        # logging.warning(f"attention_scores.shape={attention_scores.shape}")
 
         if relative_position_bias is not None:
             attention_scores += relative_position_bias[
@@ -1045,7 +1038,7 @@ class CoreAttention(MegatronModule):
 
         # attention scores and attention mask [b, np, sq, sk]
         attention_probs = self.scale_mask_softmax(attention_scores, attention_mask)
-        logging.warning(f"attention_probs.shape={attention_probs.shape}")
+        # logging.warning(f"attention_probs.shape={attention_probs.shape}")
 
         # This is actually dropping out entire tokens to attend to, which might
         # seem a bit unusual, but is taken from the original Transformer paper.
@@ -1055,7 +1048,7 @@ class CoreAttention(MegatronModule):
                 attention_probs = self.attention_dropout(attention_probs)
         else:
             attention_probs = self.attention_dropout(attention_probs)
-        logging.warning(f"attention_probs.shape={attention_probs.shape}")
+        # logging.warning(f"attention_probs.shape={attention_probs.shape}")
 
         # =========================
         # Context layer. [sq, b, hp]
@@ -1074,8 +1067,8 @@ class CoreAttention(MegatronModule):
         attention_probs = attention_probs.view(output_size[0] * output_size[1], output_size[2], -1)
 
         # matmul: [b * np, sq, hn]
-        logging.warning(f"attention_probs.shape={attention_probs.shape}")
-        logging.warning(f"value_layer.shape={value_layer.shape}")
+        # logging.warning(f"attention_probs.shape={attention_probs.shape}")
+        # logging.warning(f"value_layer.shape={value_layer.shape}")
         context_layer = torch.bmm(attention_probs, value_layer.transpose(0, 1))
 
         # change view [b, np, sq, hn]
