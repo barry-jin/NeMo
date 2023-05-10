@@ -71,8 +71,7 @@ class FlashSelfAttention(torch.nn.Module):
         attention_dropout: The dropout rate to apply to the attention
                            (default: 0.0)
     """
-    def __init__(self, causal=False, softmax_scale=None, attention_dropout=0.0,
-                 multi_query_attention=False,
+    def __init__(self, causal=False, softmax_scale=None, attention_dropout=0.0, multi_query=0,
                  sequence_parallel=False, device=None, dtype=None):
         super().__init__()
         assert rearrange is not None, 'Please install einops first, e.g., with pip install einops'
@@ -80,7 +79,7 @@ class FlashSelfAttention(torch.nn.Module):
         self.softmax_scale = softmax_scale
         self.dropout_p = attention_dropout
         self.sequence_parallel = sequence_parallel
-        self.multi_query_attention = multi_query_attention
+        self.multi_query = multi_query
 
     def forward(self, q, k, v, attention_mask=None, relative_position_bias=None):
         """Implements the multihead softmax attention.
@@ -141,7 +140,7 @@ class ParallelAttention(MegatronModule, adapter_mixins.AdapterModuleMixin):
         bias=True,
         headscale=False,
         position_embedding_type='learned_absolute',
-        multi_query_attention=False,
+        multi_query=0,
         activations_checkpoint_granularity=None,
         sequence_parallel=False,
         gradient_accumulation_fusion=False,
@@ -154,7 +153,7 @@ class ParallelAttention(MegatronModule, adapter_mixins.AdapterModuleMixin):
         self.attn_mask_type = attn_mask_type
         self.normalize_attention_scores = normalize_attention_scores
         self.position_embedding_type = position_embedding_type
-        self.multi_query_attention = multi_query_attention
+        self.multi_query = multi_query
 
         self.megatron_legacy = megatron_legacy
 
@@ -186,17 +185,16 @@ class ParallelAttention(MegatronModule, adapter_mixins.AdapterModuleMixin):
 
         # Strided linear layer.
         if attention_type == AttnType.self_attn:
-            if multi_query_attention:
-                self.multi_group = world_size
+            if multi_query > 0:
                 self.world_size = world_size
-                assert self.multi_group % self.world_size == 0, f"num groups {self.multi_group} not divisible by world size {self.world_size}"
+                assert self.multi_query % self.world_size == 0, f"num groups {self.multi_query} not divisible by world size {self.world_size}"
                 self.num_attention_heads = num_attention_heads
                 self.head_dim = self.hidden_size_per_attention_head
                 self.hidden_size_per_partition = safe_divide(projection_size, world_size)
-                self.num_group_per_partition = safe_divide(self.multi_group, world_size)
+                self.num_group_per_partition = safe_divide(self.multi_query, world_size)
                 self.query_key_value = tensor_parallel.ColumnParallelLinear(
                     hidden_size,
-                    kv_channels * (num_attention_heads + 2 * self.multi_group),  # multi head -> multi group : 3*h/p -> (h + 2*g)/p
+                    kv_channels * (num_attention_heads + 2 * self.multi_query),  # multi head -> multi group : 3*h/p -> (h + 2*g)/p
                     gather_output=False,
                     init_method=init_method,
                     use_cpu_initialization=use_cpu_initialization,
@@ -253,7 +251,7 @@ class ParallelAttention(MegatronModule, adapter_mixins.AdapterModuleMixin):
             kv_channels=kv_channels,
             masked_softmax_fusion=masked_softmax_fusion,
             attention_dropout=attention_dropout,
-            multi_query_attention=multi_query_attention,
+            multi_query=multi_query,
             sequence_parallel=sequence_parallel,
             normalize_attention_scores=normalize_attention_scores,
         )
@@ -262,7 +260,7 @@ class ParallelAttention(MegatronModule, adapter_mixins.AdapterModuleMixin):
             self.core_attention_flash = FlashSelfAttention(
                 causal=(self.attn_mask_type == AttnMaskType.causal),
                 attention_dropout=attention_dropout,
-                multi_query_attention=multi_query_attention,
+                multi_query=multi_query,
                 sequence_parallel=sequence_parallel,
             )
 
@@ -448,8 +446,8 @@ class ParallelAttention(MegatronModule, adapter_mixins.AdapterModuleMixin):
         # logging.warning(f"1")
         if self.attention_type == AttnType.self_attn:
             # logging.warning(f"2")
-            # logging.warning(f"multi_query_attention: {self.multi_query_attention}")
-            if self.multi_query_attention:
+            # logging.warning(f"multi_query: {self.multi_query}")
+            if self.multi_query:
                 # Attention heads [sq, b, h] --> [sq, b, (np * 3 * hn)]
                 mixed_x_layer, _ = self.query_key_value(hidden_states)
 
@@ -814,14 +812,14 @@ class CoreAttention(MegatronModule):
         attention_dropout=0.1,
         sequence_parallel=False,
         normalize_attention_scores=True,
-        multi_query_attention=False,
+        multi_query=False,
     ):
 
         super(CoreAttention, self).__init__()
         self.precision = precision
         self.fp16 = precision == 16
         self.bf16 = precision == 'bf16'
-        self.multi_query_attention = multi_query_attention
+        self.multi_query = multi_query
 
         self.apply_query_key_layer_scaling = apply_query_key_layer_scaling
         self.attention_softmax_in_fp32 = False
@@ -906,7 +904,7 @@ class CoreAttention(MegatronModule):
             # otherwise, only relative positional embedding takes effect
             # value_layer = apply_rotary_pos_emb(value_layer, k_pos_emb)
 
-        if self.multi_query_attention:
+        if self.multi_query > 0:
             # ---- [sq, b, np, hn] -> [b, np * sq, hn] ---- deprecated
             # [sq, b, np, hn] -> [b * np, sq, hn]
             # logging.warning(f"query_layer.shape={query_layer.shape} (sq, b, np, hn)")
