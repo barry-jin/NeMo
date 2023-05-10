@@ -25,7 +25,6 @@ from nemo.collections.nlp.modules.common.megatron.rotary_pos_embedding import ap
 from nemo.collections.nlp.modules.common.megatron.utils import ApexGuardDefaults, attention_mask_func
 from nemo.collections.nlp.modules.common.megatron.flash_attn_triton import flash_attn_func
 from nemo.core import adapter_mixins
-from nemo.utils import logging
 
 try:
     from einops import rearrange
@@ -451,16 +450,16 @@ class ParallelAttention(MegatronModule, adapter_mixins.AdapterModuleMixin):
 
                 # [sq, b, np * hn] --> [sq, b, np, hn]
                 query_layer = query_layer.view(query_layer.size()[:-1] + (self.num_attention_heads_per_partition, self.head_dim))
-                # [sq, b, gp * hn] --> [sq, b, gp, 1, hn]
-                key_layer = key_layer.view(key_layer.size()[:-1] + (self.num_group_per_partition, 1, self.head_dim))
-                value_layer = value_layer.view(value_layer.size()[:-1] + (self.num_group_per_partition, 1, self.head_dim))
+                # [sq, b, gp * hn] --> [sq, b, 1, gp, hn]
+                key_layer = key_layer.view(key_layer.size()[:-1] + (1, self.num_group_per_partition, self.head_dim))
+                value_layer = value_layer.view(value_layer.size()[:-1] + (1, self.num_group_per_partition, self.head_dim))
 
-                # [sq, b, gp, 1, hn] --> [sq, b, gp, ng, hn]
-                key_layer = key_layer.expand(key_layer.size()[:-3] + (self.num_group_per_partition, self.num_attention_heads_per_group, self.head_dim))
-                value_layer = value_layer.expand(value_layer.size()[:-3] + (self.num_group_per_partition, self.num_attention_heads_per_group, self.head_dim))
+                # [sq, b, 1, gp, hn] --> [sq, b, ng, gp, hn]
+                key_layer = key_layer.expand(key_layer.size()[:-3] + (self.num_attention_heads_per_group, self.num_group_per_partition, self.head_dim))
+                value_layer = value_layer.expand(value_layer.size()[:-3] + (self.num_attention_heads_per_group, self.num_group_per_partition, self.head_dim))
 
                 # This should become a no-op when multi_query equals to world_size
-                # [sq, b, gp, ng, hn] --> [sq, b, np, hn]
+                # [sq, b, ng, gp, hn] --> [sq, b, np, hn]
                 key_layer = key_layer.reshape(key_layer.size()[:-3] + (self.num_attention_heads_per_partition, self.head_dim))
                 value_layer = value_layer.reshape(value_layer.size()[:-3] + (self.num_attention_heads_per_partition, self.head_dim))
             else:
@@ -602,9 +601,6 @@ class ParallelAttention(MegatronModule, adapter_mixins.AdapterModuleMixin):
                 ]
 
             if self.attention_type == AttnType.self_attn:
-                # logging.warning(f"q.shape = {q.shape}")
-                # logging.warning(f"k.shape = {k.shape}")
-                # logging.warning(f"v.shape = {v.shape}")
                 context_layer = self.core_attention_flash(q, k, v, relative_position_bias=relative_position_bias)
             else:
                 context_layer = self.core_attention_flash(q, k, v, attention_mask, relative_position_bias=relative_position_bias)
@@ -804,7 +800,7 @@ class CoreAttention(MegatronModule):
         attention_dropout=0.1,
         sequence_parallel=False,
         normalize_attention_scores=True,
-        multi_query=False,
+        multi_query=0,
     ):
 
         super(CoreAttention, self).__init__()
@@ -882,7 +878,6 @@ class CoreAttention(MegatronModule):
 
         # [b, np, sq, sk]
         output_size = (query_layer.size(1), query_layer.size(2), query_layer.size(0), key_layer.size(0))
-        # logging.warning(f"output_size: [b, np, sq, sk]={output_size}")
 
         # TODO: figure out how to do this
         # apply relative positional encoding (rotary embedding)
@@ -899,12 +894,10 @@ class CoreAttention(MegatronModule):
         if self.multi_query > 0:
             # ---- [sq, b, np, hn] -> [b, np * sq, hn] ---- deprecated
             # [sq, b, np, hn] -> [b * np, sq, hn]
-            # logging.warning(f"query_layer.shape={query_layer.shape} (sq, b, np, hn)")
             query_layer = rearrange(query_layer, "sq b np hn -> sq (b np) hn")
 
             # ---- [sk, b, np, hn] -> [b, hn, sk] ---- deprecated
             # [sk, b, np, hn] -> [b * np, hn, sk]
-            # logging.warning(f"key_layer.shape={key_layer.shape} (sk, b, np, hn)")
             key_layer = rearrange(key_layer, "sk b np hn -> sk (b np) hn")
 
             # preallocting input tensor: [b * np, sq, sk]
@@ -951,7 +944,6 @@ class CoreAttention(MegatronModule):
 
         # change view to [b, np, sq, sk]
         attention_scores = matmul_result.view(*output_size)
-        # logging.warning(f"attention_scores.shape={attention_scores.shape}")
 
         if relative_position_bias is not None:
             attention_scores += relative_position_bias[
@@ -981,7 +973,6 @@ class CoreAttention(MegatronModule):
 
         # attention scores and attention mask [b, np, sq, sk]
         attention_probs = self.scale_mask_softmax(attention_scores, attention_mask)
-        # logging.warning(f"attention_probs.shape={attention_probs.shape}")
 
         # This is actually dropping out entire tokens to attend to, which might
         # seem a bit unusual, but is taken from the original Transformer paper.
@@ -991,7 +982,6 @@ class CoreAttention(MegatronModule):
                 attention_probs = self.attention_dropout(attention_probs)
         else:
             attention_probs = self.attention_dropout(attention_probs)
-        # logging.warning(f"attention_probs.shape={attention_probs.shape}")
 
         # =========================
         # Context layer. [sq, b, hp]
@@ -1010,8 +1000,6 @@ class CoreAttention(MegatronModule):
         attention_probs = attention_probs.view(output_size[0] * output_size[1], output_size[2], -1)
 
         # matmul: [b * np, sq, hn]
-        # logging.warning(f"attention_probs.shape={attention_probs.shape}")
-        # logging.warning(f"value_layer.shape={value_layer.shape}")
         context_layer = torch.bmm(attention_probs, value_layer.transpose(0, 1))
 
         # change view [b, np, sq, hn]
