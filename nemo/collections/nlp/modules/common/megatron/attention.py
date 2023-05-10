@@ -192,6 +192,7 @@ class ParallelAttention(MegatronModule, adapter_mixins.AdapterModuleMixin):
                 self.head_dim = self.hidden_size_per_attention_head
                 self.hidden_size_per_partition = safe_divide(projection_size, world_size)
                 self.num_group_per_partition = safe_divide(self.multi_query, world_size)
+                self.num_attention_heads_per_group = safe_divide(self.num_attention_heads_per_partition, self.num_group_per_partition)
                 self.query_key_value = tensor_parallel.ColumnParallelLinear(
                     hidden_size,
                     kv_channels * (num_attention_heads + 2 * self.multi_query),  # multi head -> multi group : 3*h/p -> (h + 2*g)/p
@@ -439,38 +440,29 @@ class ParallelAttention(MegatronModule, adapter_mixins.AdapterModuleMixin):
         # Query, Key, and Value
         # =====================
 
-        # logging.warning(f"AttnType.self_attn: {self.attention_type == AttnType.self_attn}")
-        # logging.warning(f"hidden_states.shape = {hidden_states.shape}")
-        # logging.warning(f"np = {self.num_attention_heads_per_partition} (num_attention_heads_per_partition)")
-        # logging.warning(f"hn = {self.hidden_size_per_attention_head} (hidden_size_per_attention_head)")
-        # logging.warning(f"1")
         if self.attention_type == AttnType.self_attn:
-            # logging.warning(f"2")
-            # logging.warning(f"multi_query: {self.multi_query}")
-            if self.multi_query:
+            if self.multi_query > 0:
                 # Attention heads [sq, b, h] --> [sq, b, (np * 3 * hn)]
                 mixed_x_layer, _ = self.query_key_value(hidden_states)
 
                 assert mixed_x_layer.size()[-1] == (self.hidden_size_per_partition + 2 * self.num_group_per_partition * self.head_dim)
                 sizes = (self.hidden_size_per_partition, self.hidden_size_per_partition + self.head_dim * self.num_group_per_partition)
                 query_layer, key_layer, value_layer = torch.tensor_split(mixed_x_layer, sizes, dim=-1)
-                # logging.warning(f"query_layer.shape = {query_layer.shape}")
-                # logging.warning(f"key_layer.shape = {key_layer.shape}")
-                # logging.warning(f"value_layer.shape = {value_layer.shape}")
 
-                # [sq, b, g/p * k] --> [sq, b, g/p, k]
-                key_layer = key_layer.view(key_layer.size()[:-1] + (self.num_group_per_partition, self.head_dim))
-                value_layer = value_layer.view(value_layer.size()[:-1] + (self.num_group_per_partition, self.head_dim))
+                # [sq, b, np * hn] --> [sq, b, np, hn]
                 query_layer = query_layer.view(query_layer.size()[:-1] + (self.num_attention_heads_per_partition, self.head_dim))
-                # logging.warning(f"query_layer.shape (view) = {query_layer.shape}")
-                # logging.warning(f"key_layer.shape (view) = {key_layer.shape}")
-                # logging.warning(f"value_layer.shape (view) = {value_layer.shape}")
+                # [sq, b, gp * hn] --> [sq, b, gp, 1, hn]
+                key_layer = key_layer.view(key_layer.size()[:-1] + (self.num_group_per_partition, 1, self.head_dim))
+                value_layer = value_layer.view(value_layer.size()[:-1] + (self.num_group_per_partition, 1, self.head_dim))
 
-                # [sq, b, g/p, k] --> [sq, b, n, k]
-                key_layer = key_layer.expand(key_layer.size()[:-2] + (self.num_attention_heads_per_partition, self.head_dim))
-                value_layer = value_layer.expand(value_layer.size()[:-2] + (self.num_attention_heads_per_partition, self.head_dim))
-                # logging.warning(f"key_layer.shape (expand) = {key_layer.shape}")
-                # logging.warning(f"value_layer.shape (expand) = {value_layer.shape}")
+                # [sq, b, gp, 1, hn] --> [sq, b, gp, ng, hn]
+                key_layer = key_layer.expand(key_layer.size()[:-3] + (self.num_group_per_partition, self.num_attention_heads_per_group, self.head_dim))
+                value_layer = value_layer.expand(value_layer.size()[:-3] + (self.num_group_per_partition, self.num_attention_heads_per_group, self.head_dim))
+
+                # This should become a no-op when multi_query equals to world_size
+                # [sq, b, gp, ng, hn] --> [sq, b, np, hn]
+                key_layer = key_layer.reshape(key_layer.size()[:-3] + (self.num_attention_heads_per_partition, self.head_dim))
+                value_layer = value_layer.reshape(value_layer.size()[:-3] + (self.num_attention_heads_per_partition, self.head_dim))
             else:
                 # Attention heads [sq, b, h] --> [sq, b, (np * 3 * hn)]
                 mixed_x_layer, _ = self.query_key_value(hidden_states)
